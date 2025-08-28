@@ -62,8 +62,11 @@ Copy the entire warhammer_dict folder to the koreader/data/dict/ directory on yo
 
 Contributions are welcome and greatly appreciated. You can help in a few ways:
 
-   Improve the scraper's logic by editing the **WarhammerScraper.cs** file.
-   Expand the list of source pages in **WarhammerScraper.cs** to add more content.
+ 1.Improve the scraper's logic by editing the **WarhammerScraper.cs** file.
+ 
+ 2.Expand the list of source pages in **WarhammerScraper.cs** to add more content.
+ 
+ 3.Directly edit the **warhammer.tsv** file to add, correct, or improve entries.
 
 To contribute, please follow these steps:
 
