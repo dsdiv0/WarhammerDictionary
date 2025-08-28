@@ -12,11 +12,11 @@ There are two ways to get the dictionary: using the pre-made version (easy) or b
 
 This is the quickest way to get started.
 
-    Go to the premade-dictionary folder in this repository.
+    Go to the PreMadeDicts folder in this repository.
 
-    Download the entire warhammer_dict folder to your computer.
+    Download the entire folder to your computer.
 
-    Open the file manager on your device and copy the warhammer_dict folder to the koreader/data/dict/ directory on your device.
+    Open the file manager on your device and copy the PreMadeDicts folder to the koreader/data/dict/ directory on your device.
 
 That's it! The dictionary is now installed.
 
