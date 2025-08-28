@@ -60,7 +60,10 @@ Copy the entire warhammer_dict folder to the koreader/data/dict/ directory on yo
 
 **Contributing**
 
-Contributions are welcome and greatly appreciated. You can help by expanding the list of source pages in WarhammerScraper.cs or by improving the scraper's logic.
+Contributions are welcome and greatly appreciated. You can help in a few ways:
+
+   Improve the scraper's logic by editing the **WarhammerScraper.cs** file.
+   Expand the list of source pages in **WarhammerScraper.cs** to add more content.
 
 To contribute, please follow these steps:
 
