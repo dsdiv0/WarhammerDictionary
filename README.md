@@ -56,7 +56,7 @@ pyglossary warhammer.tsv warhammer_dict --write-format=Stardict
 ```
 5. Install on KOReader
 
-Copy the entire warhammer_dict folder to the KOReader/data/dict/ directory on your e-reader.
+Copy the entire warhammer_dict folder to the koreader/data/dict/ directory on your device.
 
 **Contributing**
 
