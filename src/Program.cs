@@ -1,252 +1,225 @@
-﻿using System;
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Net.Http;
 using System.Text;
 using System.Text.RegularExpressions;
-using System.Net.Http;
-using HtmlAgilityPack;
-using System.Collections.Generic;
-using System.Linq;
 using System.Threading.Tasks;
-using System.IO;
+using HtmlAgilityPack;
 
-class WarhammerScraper
+class WarhammerCrawler
 {
-  // --- Configuration ---
-  // Here you can easily tweak how the scraper behaves.
+  // a few settings to tweak
   static readonly string BaseUrl = "https://wh40k.lexicanum.com";
   static readonly string OutputFile = "warhammer.tsv";
-  static readonly string ProgressFile = "warhammer_progress.txt"; // This file lets us resume if the script stops.
+  static readonly string ProgressFile = "warhammer_progress.txt"; // so we can resume if it crashes
   static readonly HttpClient client = new HttpClient();
-  static readonly Regex FootnoteRegex = new(@"\[\d+\]", RegexOptions.Compiled); // Pre-compiling the regex makes it faster.
+  static readonly Regex FootnoteRegex = new(@"\[\d+\]", RegexOptions.Compiled);
 
-  // This is our starting list of pages to crawl for links.
-  static readonly string[] IndexPages = new[]
-  {
-        "/wiki/Imperial_Terms",
-        "/wiki/List_of_Terms",
-        "/wiki/Imperial_Guard_Terms",
-        "/wiki/Loyal_Space_Marine_Chapters_(List)",
-        "/wiki/Pictorial_List_of_Space_Marine_Chapters_A-L",
-        "/wiki/Chaos_Space_Marine_Legions_and_Warbands_(List)",
-        "/wiki/List_of_Titan_Legions",
-        "/wiki/Traitor_Titan_Legions",
-        "/wiki/Category:Lists",
-        "/wiki/Category:Languages",
-        "/wiki/Eldar_Lexicon",
-        "/wiki/Ork_Language",
-        "/wiki/T%27au_Lexicon",
-        "/wiki/List_of_sentient_species",
-        "/wiki/List_of_Primarchs",
-        "/wiki/List_of_Imperial_Characters",
-        "/wiki/List_of_Chaos_Characters",
-        "/wiki/List_of_Inquisitors",
-        "/wiki/List_of_Planets",
-        "/wiki/List_of_Forge_Worlds",
-        "/wiki/List_of_Wars",
-        "/wiki/Imperial_Wargear_(List)",
-        "/wiki/Necron_Lexicon",
-        "/wiki/Tyranid_Nomenclature",
-        "/wiki/List_of_Daemons",
-        "/wiki/Category:Imperial_Organisations",
-        "/wiki/Category:Technology"
+  // --- More powerful filtering ---
+  static readonly string[] IgnoredUrlPrefixes = { "/wiki/File:", "/wiki/Talk:", "/wiki/Help:", "/wiki/MediaWiki:", "/wiki/Special:", "/wiki/Template:", "/wiki/Lexicanum:", "/wiki/Category:Images" };
+  static readonly string[] IgnoredUrlSuffixes = { "(List)", "(Novel)", "(Novella)", "(Short_Story)", "(Audio_Drama)", "(Game)", "(Rulebook)", "(Animation)", "(Disambiguation)" };
+  // This list checks for keywords anywhere in the URL to catch rulebooks and specific media.
+  static readonly string[] IgnoredUrlKeywords = {
+        "(RPG_series)", "Rulebook", "Heresy", "Anthology", "Game_Master", "Player%27s_Guide",
+        "Core_Manual", "Compendium", "Index", "Army_List", "(Audio_Book)", "Novel_Series",
+        "_Journal_", "_Magazine", "Inferno", "Imperium_", "List_of_", "Known_Members_of_",
+        "Known_Vessels_of_", "Tabletop", "Edition", "Main_Page"
     };
 
-  // Using HashSets is super fast for checking if we've already processed an item.
-  static readonly HashSet<string> SeenTitles = new();
-  static readonly HashSet<string> SeenDescriptions = new();
 
-  // --- Scraper Settings ---
-  static readonly bool IncludeUrlColumn = false; // Set to true if you want a URL column in your TSV.
-  static readonly int MaxParagraphs = 3;         // How many paragraphs to grab for the description.
-  static readonly int MaxRetries = 3;            // How many times to retry a failed web request.
-  static readonly int ParallelLimit = 5;         // How many pages to process at the same time.
-  static readonly int DelayBetweenBatches = 250; // A small pause (in ms) to be polite to the server.
+  // --- SIMPLIFIED: Using only the single best hub page to start the crawl ---
+  static readonly string HubPage = "/wiki/Warhammer_40k_-_Lexicanum:List_of_Categories";
+
+  // crawler limits and stuff
+  static readonly int MaxEntries = 25000; // safety break so it doesn't run forever
+  static readonly int MaxParagraphs = 3;
+  static readonly int MaxRetries = 3;
+  static readonly int ParallelLimit = 10;
+  static readonly int DelayBetweenRequests = 100;
+
+  // lists to keep track of things, gotta be thread-safe for parallel stuff
+  static readonly ConcurrentDictionary<string, byte> QueuedOrProcessedUrls = new ConcurrentDictionary<string, byte>();
+  static readonly ConcurrentQueue<string> UrlsToCrawl = new ConcurrentQueue<string>();
+  static readonly ConcurrentDictionary<string, byte> SeenDescriptions = new ConcurrentDictionary<string, byte>();
 
   static async Task Main()
   {
-    // It's good practice to set a User-Agent so the website knows who is scraping.
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("WH-Glossary-Bot/1.0");
-    var sb = new StringBuilder();
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("WH-Glossary-Bot/3.7");
 
-    // Set up the header row for our TSV file.
-    sb.AppendLine(IncludeUrlColumn ? "Title\tURL\tDescription" : "Title\tDescription");
-
-    // If we've run this before and it was interrupted, load our progress.
-    if (File.Exists(ProgressFile))
+    // only write the header if the file is new
+    if (!File.Exists(OutputFile))
     {
-      Console.WriteLine("Found a progress file. Resuming from where we left off...");
-      foreach (var line in File.ReadAllLines(ProgressFile))
+      File.WriteAllText(OutputFile, "Title\tDescription" + Environment.NewLine);
+    }
+
+    LoadProgress();
+
+    // --- SIMPLIFIED: Directly seed from the single hub page ---
+    Console.WriteLine("Finding starting links from the main hub page...");
+    await SeedFromHubPage(BaseUrl + HubPage);
+    Console.WriteLine($"Seeding done. Found {UrlsToCrawl.Count} links to start with.");
+
+    // now go through the huge list of links we just made
+    Console.WriteLine("Starting the main crawl...");
+    var processedCount = QueuedOrProcessedUrls.Count - UrlsToCrawl.Count;
+    while (UrlsToCrawl.Count > 0 && processedCount < MaxEntries)
+    {
+      var tasks = new List<Task>();
+      for (int i = 0; i < ParallelLimit && UrlsToCrawl.Count > 0; i++)
       {
-        SeenTitles.Add(line);
+        if (UrlsToCrawl.TryDequeue(out var urlToProcess))
+        {
+          tasks.Add(ProcessUrl(urlToProcess));
+        }
       }
+      await Task.WhenAll(tasks);
+      processedCount = QueuedOrProcessedUrls.Count - UrlsToCrawl.Count;
+      Console.WriteLine($"To-do: {UrlsToCrawl.Count} | Done: {processedCount}/{MaxEntries}");
     }
 
-    // Kick off the scraping process for each of our starting pages.
-    foreach (var page in IndexPages)
-    {
-      Console.WriteLine($"Scraping category: {page}");
-      await ScrapeCategory(page, sb);
-    }
-
-    await File.WriteAllTextAsync(OutputFile, sb.ToString());
-    Console.WriteLine($"All done! Dictionary TSV saved as {OutputFile}");
-    // Clean up the progress file now that we're finished.
-    if (File.Exists(ProgressFile)) File.Delete(ProgressFile);
+    Console.WriteLine($"All done! Dictionary saved to {OutputFile}");
   }
 
-  static async Task ScrapeCategory(string categoryUrl, StringBuilder sb)
+  // just grabs all the links from a hub page to get us started
+  static async Task SeedFromHubPage(string hubUrl)
   {
-    try
-    {
-      var html = await GetWithRetries(BaseUrl + categoryUrl);
-      if (string.IsNullOrEmpty(html)) return;
-
-      var doc = new HtmlDocument();
-      doc.LoadHtml(html);
-
-      // Find all unique links on the page that point to another wiki article.
-      var links = doc.DocumentNode.SelectNodes("//a[@href]")
-          ?.Select(a => a.GetAttributeValue("href", ""))
-          .Where(href => href.StartsWith("/wiki/"))
-          .Distinct();
-
-      if (links == null) return;
-
-      // We process the links in small batches so we don't hammer the server all at once.
-      var batch = links.Select(link => ProcessLink(link, sb)).ToArray();
-      for (int i = 0; i < batch.Length; i += ParallelLimit)
-      {
-        var chunk = batch.Skip(i).Take(ParallelLimit);
-        await Task.WhenAll(chunk);
-        // A short pause between batches is good manners and helps avoid getting blocked.
-        await Task.Delay(DelayBetweenBatches);
-      }
-    }
-    catch (Exception ex)
-    {
-      Console.WriteLine($"Oops, failed to scrape category {categoryUrl}: {ex.Message}");
-    }
-  }
-
-  static async Task ProcessLink(string link, StringBuilder sb)
-  {
-    // A little bit of filtering to avoid pages we don't want.
-    if (link.Contains(":")) return; // Skips categories, templates, etc.
-    if (link.EndsWith("(List)")) return;
-    if (link.EndsWith("(Novel)")) return;
-    if (link.EndsWith("(Rulebook)")) return;
-
-    // Turn the URL part into a nice, readable title.
-    var title = Uri.UnescapeDataString(link.Replace("/wiki/", "").Replace("_", " "));
-
-    if (SeenTitles.Contains(title)) return; // We've already got this one, skip it.
-
-    // Disambiguation pages are special; they are just lists of links to other pages.
-    if (title.EndsWith("(disambiguation)"))
-    {
-      await ScrapeDisambiguation(link, sb);
-      return;
-    }
-
-    var description = await FetchDescription(link);
-    if (string.IsNullOrWhiteSpace(description)) return;
-
-    // Sometimes different titles lead to the same description (redirects). Let's skip those.
-    if (SeenDescriptions.Contains(description)) return;
-
-    // If we've made it this far, it's a good entry. Let's add it.
-    SeenTitles.Add(title);
-    SeenDescriptions.Add(description);
-
-    if (IncludeUrlColumn)
-      sb.AppendLine($"{title}\t{BaseUrl + link}\t{description}");
-    else
-      sb.AppendLine($"{title}\t{description}");
-
-    Console.WriteLine($"Added: {title}");
-
-    // Save our progress immediately so we can resume if something goes wrong.
-    await File.AppendAllTextAsync(ProgressFile, title + Environment.NewLine);
-  }
-
-  static async Task ScrapeDisambiguation(string disambLink, StringBuilder sb)
-  {
-    var html = await GetWithRetries(BaseUrl + disambLink);
+    Console.WriteLine($"Grabbing links from: {hubUrl}");
+    string html = await GetWithRetries(hubUrl);
     if (string.IsNullOrEmpty(html)) return;
 
     var doc = new HtmlDocument();
     doc.LoadHtml(html);
 
-    // On these pages, the real links are usually in a list.
-    var innerLinks = doc.DocumentNode.SelectNodes("//div[@id='mw-content-text']//li/a[@href]")
-        ?.Select(a => a.GetAttributeValue("href", ""))
-        .Where(href => href.StartsWith("/wiki/") && !href.Contains(":"))
-        .Distinct();
+    var linksOnPage = doc.DocumentNode.SelectNodes("//div[@id='mw-content-text']//a[@href]");
+    if (linksOnPage == null) return;
 
-    if (innerLinks == null) return;
-
-    // Process each link found on the disambiguation page.
-    foreach (var link in innerLinks)
+    foreach (var linkNode in linksOnPage)
     {
-      await ProcessLink(link, sb);
+      var href = linkNode.GetAttributeValue("href", "");
+      EnqueueUrl(href);
     }
   }
 
-  // This is where the magic happens for cleaning up the article text.
-  static async Task<string> FetchDescription(string link)
+  // this is the main workhorse, processes one url
+  static async Task ProcessUrl(string url)
   {
-    string html = await GetWithRetries(BaseUrl + link);
-    if (string.IsNullOrEmpty(html)) return "";
+    await Task.Delay(DelayBetweenRequests); // play nice with their server
+    string html = await GetWithRetries(url);
+    if (string.IsNullOrEmpty(html)) return;
 
     var doc = new HtmlDocument();
     doc.LoadHtml(html);
 
-    // First, we grab the main content area of the page.
+    // find more links on the current page to crawl later
+    var linksOnPage = doc.DocumentNode.SelectNodes("//div[@id='mw-content-text']//a[@href]");
+    if (linksOnPage != null)
+    {
+      foreach (var linkNode in linksOnPage)
+      {
+        var href = linkNode.GetAttributeValue("href", "");
+        EnqueueUrl(href);
+      }
+    }
+
+    // now, actually get the content from this page
+    var titleNode = doc.DocumentNode.SelectSingleNode("//h1[@id='firstHeading']");
+    if (titleNode == null) return;
+
+    var title = System.Net.WebUtility.HtmlDecode(titleNode.InnerText.Trim());
+
+    // Skip adding category pages and other broad, non-lore topics to the dictionary
+    if (title.StartsWith("Category:") || title == "Warhammer 40,000")
+    {
+      return;
+    }
+
+    var description = ExtractDescription(doc);
+    if (string.IsNullOrWhiteSpace(description) || !SeenDescriptions.TryAdd(description, 0))
+    {
+      return; // skip if no description or we've seen it before
+    }
+
+    // if we got here, it's a good entry. save it.
+    await File.AppendAllTextAsync(OutputFile, $"{title}\t{description}" + Environment.NewLine);
+    await File.AppendAllTextAsync(ProgressFile, url.Replace(BaseUrl, "") + Environment.NewLine);
+    Console.WriteLine($"Added: {title}");
+  }
+
+  // helper to check if a link is worth adding to our to-do list
+  static void EnqueueUrl(string href)
+  {
+    // check if the link is garbage before we even add it to the queue
+    if (!href.StartsWith("/wiki/") ||
+        IgnoredUrlPrefixes.Any(prefix => href.StartsWith(prefix)) ||
+        IgnoredUrlSuffixes.Any(suffix => href.EndsWith(suffix)) ||
+        IgnoredUrlKeywords.Any(keyword => href.Contains(keyword)))
+    {
+      return;
+    }
+
+    var newFullUrl = BaseUrl + href;
+    if (QueuedOrProcessedUrls.TryAdd(newFullUrl, 0))
+    {
+      UrlsToCrawl.Enqueue(newFullUrl);
+    }
+  }
+
+  // for resuming a crashed session
+  static void LoadProgress()
+  {
+    if (!File.Exists(ProgressFile)) return;
+    Console.WriteLine("Found progress file, loading stuff we've already done.");
+    var seenCount = 0;
+    foreach (var line in File.ReadAllLines(ProgressFile))
+    {
+      if (!string.IsNullOrWhiteSpace(line))
+      {
+        QueuedOrProcessedUrls.TryAdd(BaseUrl + line, 0);
+        seenCount++;
+      }
+    }
+    Console.WriteLine($"Loaded {seenCount} URLs from last time.");
+  }
+
+  // pulls the description text out and cleans it up
+  static string ExtractDescription(HtmlDocument doc)
+  {
     var contentNode = doc.DocumentNode.SelectSingleNode("//div[@id='mw-content-text']");
     if (contentNode == null) return "";
 
-    // --- Content Cleanup ---
-    // Before we grab the text, we remove all the stuff we don't want.
-    // This gets rid of warning boxes like the "citation needed" one.
+    // get rid of junk like infoboxes and warning templates
     contentNode.SelectNodes(".//table[contains(@class, 'metadata')]")?.ToList().ForEach(n => n.Remove());
-    // This removes the big quote blocks.
     contentNode.SelectNodes(".//blockquote")?.ToList().ForEach(n => n.Remove());
-    // And this removes the side info boxes.
     contentNode.SelectNodes(".//div[contains(@class, 'infobox')]")?.ToList().ForEach(n => n.Remove());
+    contentNode.SelectNodes(".//div[@id='toc']")?.ToList().ForEach(n => n.Remove());
 
-    // NOW we can safely grab the paragraphs from our cleaned-up content.
     var paragraphs = contentNode.SelectNodes(".//p[normalize-space()]");
     if (paragraphs == null) return "";
 
-    var selectedParagraphs = paragraphs.Take(MaxParagraphs).Select(p => p.InnerText);
-    var text = string.Join(" ", selectedParagraphs);
+    var text = string.Join(" ", paragraphs.Take(MaxParagraphs).Select(p => p.InnerText));
 
-    // Final cleanup of the text itself.
-    text = FootnoteRegex.Replace(text, ""); // Remove footnote markers like [1], [2], etc.
-    text = System.Net.WebUtility.HtmlDecode(text); // Turn things like &amp; into &
-    text = Regex.Replace(text, @"\s+", " ").Trim(); // Condense all whitespace into single spaces.
+    // Remove any hidden tab characters from the description
+    text = text.Replace('\t', ' '); // Replace tabs with spaces
 
+    // final cleanup on the text itself
+    text = FootnoteRegex.Replace(text, "");
+    text = System.Net.WebUtility.HtmlDecode(text);
+    text = Regex.Replace(text, @"\s+", " ").Trim();
     return text;
   }
 
-  // A simple but effective way to handle network hiccups.
+  // simple retry logic in case the network flakes out
   static async Task<string> GetWithRetries(string url)
   {
     for (int i = 0; i < MaxRetries; i++)
     {
-      try
-      {
-        // Try to get the page content.
-        return await client.GetStringAsync(url);
-      }
-      catch (HttpRequestException ex)
-      {
-        // If it fails, wait a moment and then the loop will try again.
-        Console.WriteLine($"Request for {url} failed: {ex.StatusCode}. Retrying...");
-        await Task.Delay(500 * (i + 1)); // Wait a bit longer after each failure.
-      }
+      try { return await client.GetStringAsync(url); }
+      catch { await Task.Delay(500 * (i + 1)); }
     }
-    // If it fails after all retries, we log it and move on.
-    Console.WriteLine($"Failed to fetch {url} after {MaxRetries} retries.");
+    Console.WriteLine($"Couldn't get {url} after {MaxRetries} tries, skipping it.");
     return "";
   }
 }
