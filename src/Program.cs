@@ -18,7 +18,6 @@ class WarhammerCrawler
   static readonly HttpClient client = new HttpClient();
   static readonly Regex FootnoteRegex = new(@"\[\d+\]", RegexOptions.Compiled);
 
-  // --- More powerful filtering ---
   static readonly string[] IgnoredUrlPrefixes = { "/wiki/File:", "/wiki/Talk:", "/wiki/Help:", "/wiki/MediaWiki:", "/wiki/Special:", "/wiki/Template:", "/wiki/Lexicanum:", "/wiki/Category:Images" };
   static readonly string[] IgnoredUrlSuffixes = { "(List)", "(Novel)", "(Novella)", "(Short_Story)", "(Audio_Drama)", "(Game)", "(Rulebook)", "(Animation)", "(Disambiguation)" };
   // This list checks for keywords anywhere in the URL to catch rulebooks and specific media.
@@ -29,38 +28,36 @@ class WarhammerCrawler
         "Known_Vessels_of_", "Tabletop", "Edition", "Main_Page"
     };
 
-
-  // --- SIMPLIFIED: Using only the single best hub page to start the crawl ---
+  // Using only the single best hub page to start the crawl
   static readonly string HubPage = "/wiki/Warhammer_40k_-_Lexicanum:List_of_Categories";
 
   // crawler limits and stuff
-  static readonly int MaxEntries = 25000; // safety break so it doesn't run forever
-  static readonly int MaxParagraphs = 3;
+  static readonly int MaxEntries = 50000; // safety break so it doesn't run forever
+  static readonly int MaxParagraphs = 2; // Grab the first two good paragraphs
   static readonly int MaxRetries = 3;
   static readonly int ParallelLimit = 10;
   static readonly int DelayBetweenRequests = 100;
 
   // lists to keep track of things, gotta be thread-safe for parallel stuff
-  static readonly ConcurrentDictionary<string, byte> QueuedOrProcessedUrls = new ConcurrentDictionary<string, byte>();
-  static readonly ConcurrentQueue<string> UrlsToCrawl = new ConcurrentQueue<string>();
-  static readonly ConcurrentDictionary<string, byte> SeenDescriptions = new ConcurrentDictionary<string, byte>();
+  static readonly ConcurrentDictionary<string, byte> QueuedOrProcessedUrls = new();
+  static readonly ConcurrentQueue<string> UrlsToCrawl = new();
+  static readonly ConcurrentDictionary<string, byte> SeenDescriptions = new();
 
   static async Task Main()
   {
-    client.DefaultRequestHeaders.UserAgent.ParseAdd("WH-Glossary-Bot/3.7");
+    client.DefaultRequestHeaders.UserAgent.ParseAdd("WH-Glossary-Bot/4.0");
 
-    // only write the header if the file is new
+    // only write the header if the file is new, so we don't erase progress
     if (!File.Exists(OutputFile))
     {
-      File.WriteAllText(OutputFile, "Title\tDescription" + Environment.NewLine);
+      await File.WriteAllTextAsync(OutputFile, "Title\tDescription" + Environment.NewLine);
     }
 
     LoadProgress();
 
-    // --- SIMPLIFIED: Directly seed from the single hub page ---
     Console.WriteLine("Finding starting links from the main hub page...");
     await SeedFromHubPage(BaseUrl + HubPage);
-    Console.WriteLine($"Seeding done. Found {UrlsToCrawl.Count} links to start with.");
+    Console.WriteLine($"Seeding done. Found {UrlsToCrawl.Count} potential links to start with.");
 
     // now go through the huge list of links we just made
     Console.WriteLine("Starting the main crawl...");
@@ -130,8 +127,8 @@ class WarhammerCrawler
 
     var title = System.Net.WebUtility.HtmlDecode(titleNode.InnerText.Trim());
 
-    // Skip adding category pages and other broad, non-lore topics to the dictionary
-    if (title.StartsWith("Category:") || title == "Warhammer 40,000")
+    // Skip adding category pages themselves to the dictionary
+    if (title.StartsWith("Category:"))
     {
       return;
     }
@@ -143,7 +140,9 @@ class WarhammerCrawler
     }
 
     // if we got here, it's a good entry. save it.
-    await File.AppendAllTextAsync(OutputFile, $"{title}\t{description}" + Environment.NewLine);
+    var tsvLine = new StringBuilder();
+    tsvLine.Append(title).Append('\t').Append(description).Append(Environment.NewLine);
+    await File.AppendAllTextAsync(OutputFile, tsvLine.ToString());
     await File.AppendAllTextAsync(ProgressFile, url.Replace(BaseUrl, "") + Environment.NewLine);
     Console.WriteLine($"Added: {title}");
   }
@@ -190,19 +189,41 @@ class WarhammerCrawler
     var contentNode = doc.DocumentNode.SelectSingleNode("//div[@id='mw-content-text']");
     if (contentNode == null) return "";
 
-    // get rid of junk like infoboxes and warning templates
+    // get rid of junk like infoboxes and other templates
     contentNode.SelectNodes(".//table[contains(@class, 'metadata')]")?.ToList().ForEach(n => n.Remove());
     contentNode.SelectNodes(".//blockquote")?.ToList().ForEach(n => n.Remove());
     contentNode.SelectNodes(".//div[contains(@class, 'infobox')]")?.ToList().ForEach(n => n.Remove());
     contentNode.SelectNodes(".//div[@id='toc']")?.ToList().ForEach(n => n.Remove());
 
-    var paragraphs = contentNode.SelectNodes(".//p[normalize-space()]");
-    if (paragraphs == null) return "";
+    var allParagraphs = contentNode.SelectNodes(".//p[normalize-space()]");
+    if (allParagraphs == null) return "";
 
-    var text = string.Join(" ", paragraphs.Take(MaxParagraphs).Select(p => p.InnerText));
+    // Filter out the warning paragraphs before taking any
+    var goodParagraphsText = new List<string>();
+    foreach (var p in allParagraphs)
+    {
+      var pText = p.InnerText.Trim();
+      // This checks for the specific warning text and skips the paragraph if it's found
+      if (pText.StartsWith("Some text passages and/or images"))
+      {
+        continue; // This is a warning paragraph, ignore it.
+      }
 
-    // Remove any hidden tab characters from the description
-    text = text.Replace('\t', ' '); // Replace tabs with spaces
+      goodParagraphsText.Add(p.InnerText);
+
+      if (goodParagraphsText.Count >= MaxParagraphs)
+      {
+        break; // We have enough good paragraphs, stop looking.
+      }
+    }
+
+    if (goodParagraphsText.Count == 0) return "";
+
+    // Join the good paragraphs with HTML line breaks for better formatting in KOReader
+    var text = string.Join("<br><br>", goodParagraphsText);
+
+    // Remove any hidden tab characters that might mess up the TSV
+    text = text.Replace('\t', ' ');
 
     // final cleanup on the text itself
     text = FootnoteRegex.Replace(text, "");
