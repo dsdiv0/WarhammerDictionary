@@ -14,11 +14,13 @@ This is the quickest way to get started.
 
     Go to the PreMadeDicts folder in this repository.
 
-    Download the entire folder to your computer.
+    Download the entire whDict folder to your computer.
 
-    Open the file manager on your device and copy the PreMadeDicts folder to the koreader/data/dict/ directory on your device.
+    Open the file manager on your device and copy the whDict folder to the koreader/data/dict/ directory on your device.
 
 That's it! The dictionary is now installed.
+
+**To Select the Dictionary,** open Koreader app and open the top menu -> click on the magnifying glass symbol -> Settings -> Dictionary Settings -> Manage Dictionaries. Make sure warhammer.tsv is sellected here.
 
 **Option 2: Build from Source**
 
