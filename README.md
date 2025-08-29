@@ -1,4 +1,6 @@
-**Warhammer 40k Dictionary for KOReader**
+##**Work In Progress, Please Report any issues in the Issues Section.**
+
+#**Warhammer 40k Dictionary for KOReader**
 
 **This project provides a comprehensive, offline Warhammer 40k dictionary for [KOReader](https://github.com/koreader/koreader), a versatile document viewer for e-ink readers and Android devices as well as Linux. It's designed for fans reading Warhammer novels who want to quickly look up terms, characters, and lore without leaving the book or needing an internet connection.**
 
